@@ -8,19 +8,20 @@
 #include "memlayout.h"
 #include "mmu.h"
 #include "spinlock.h"
-
+#include<stddef.h>
 void freerange(void *vstart, void *vend);
 extern char end[]; // first address after kernel loaded from ELF file
                    // defined by the kernel linker script in kernel.ld
 
 struct run {
   struct run *next;
+  struct run *prev;
 };
 
 struct {
   struct spinlock lock;
   int use_lock;
-  struct run *freelist;
+  struct run *freelist1, *freelist2;
 } kmem;
 
 // Initialization happens in two phases.
@@ -33,6 +34,8 @@ kinit1(void *vstart, void *vend)
 {
   initlock(&kmem.lock, "kmem");
   kmem.use_lock = 0;
+  kmem.freelist1 = NULL;
+  kmem.freelist2 = NULL;
   freerange(vstart, vend);
 }
 
@@ -59,7 +62,7 @@ freerange(void *vstart, void *vend)
 void
 kfree(char *v)
 {
-  struct run *r;
+  struct run *r, *tmp;
 
   if((uint)v % PGSIZE || v < end || V2P(v) >= PHYSTOP)
     panic("kfree");
@@ -69,9 +72,23 @@ kfree(char *v)
 
   if(kmem.use_lock)
     acquire(&kmem.lock);
+  
   r = (struct run*)v;
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+
+  if(kmem.freelist1 == NULL && kmem.freelist2 == NULL){
+  	kmem.freelist1 = kmem.freelist2 = r;
+  	r->next = r->prev = r;
+  }
+  
+  else{
+  	tmp = kmem.freelist2;
+  	tmp->next->prev = r;
+  	r->next = tmp->next;
+  	tmp->next = r;
+  	r->prev = tmp;
+ 	kmem.freelist1 = r;
+  }
+
   if(kmem.use_lock)
     release(&kmem.lock);
 }
@@ -82,14 +99,27 @@ kfree(char *v)
 char*
 kalloc(void)
 {
-  struct run *r;
+  struct run *r, *tmp;
 
   if(kmem.use_lock)
     acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
+
+  r = kmem.freelist1;
+  if(kmem.freelist1 == kmem.freelist2){
+	kmem.freelist1 = kmem.freelist2 = NULL;
+
+  }
+  
+  else{
+  	tmp = kmem.freelist2;
+  	if(r){
+    		kmem.freelist1 = r->next;
+    		tmp->next = r->next;
+    		r->next->prev = tmp;
+  	}
+  }
   if(kmem.use_lock)
     release(&kmem.lock);
   return (char*)r;
 }
+
